@@ -1,8 +1,8 @@
 %{
 #include "rtfparser.h"
 
-int set_destination = 0;
-int in_binmode = 0;
+int destination_mode = 0;
+int bin_mode = 0;
 long binlen = 0;
 long binpos = 0;
 long bracecount = 0;
@@ -18,9 +18,9 @@ long destbracecount = 0;
 %option noyywrap
 %option prefix="rtf_yy"
 %%
-                                   if(set_destination){
+                                   if(destination_mode){
                                      BEGIN destination;
-                                     set_destination = destbracecount = 0;
+                                     destination_mode = destbracecount = 0;
                                    }
 <destctl>bin[0-9]+[ \t]?           {
                                      register int c;
@@ -47,21 +47,21 @@ long destbracecount = 0;
 <control>[-~*\\:_{|}\r\n]          { BEGIN INITIAL; return CSYMB; }
 <control>[A-Za-z]+                 {
                                      if(!strcmp(rtf_yytext, "bin"))
-                                       in_binmode = 1;
+                                       bin_mode = 1;
                                      BEGIN cparms;
                                      return CWORD;
                                    }
 <control>'                         { BEGIN hexmode; return CSYMB; }
 <control>.                         { BEGIN INITIAL; return CUNDF; }
 <cparms>-?[0-9]+                   {
-                                     if(in_binmode){
+                                     if(bin_mode){
                                        binlen = strtol(rtf_yytext, NULL, 10);
                                        binpos = 0;
                                      }
                                      return CPARM;
                                    }
 <cparms>[ \t\r\n]                  { 
-                                     if(in_binmode){
+                                     if(bin_mode){
                                        BEGIN binmode;
                                      }else{
                                        BEGIN INITIAL;
@@ -71,7 +71,7 @@ long destbracecount = 0;
 <cparms>.                          { 
                                      unput(rtf_yytext[0]);
                                      rtf_yyleng = 0;
-                                     if(in_binmode){
+                                     if(bin_mode){
                                        BEGIN binmode;
                                      }else{
                                        BEGIN INITIAL;
@@ -83,7 +83,7 @@ long destbracecount = 0;
 <binmode>.|\n                      {
                                      binpos++;
                                      if(binpos >= binlen-1){
-                                       in_binmode = 0;
+                                       bin_mode = 0;
                                        BEGIN INITIAL;
                                        return ENBIN;
                                      }
@@ -112,11 +112,13 @@ long destbracecount = 0;
 %%
 
 void rtf_set_destination(void){
-  set_destination = 1;
+  destination_mode = 1;
 }
 
 void rtf_set_source(FILE *fh){
-  rtf_yyin = fh;
-  set_destination = bracecount = destbracecount = 0;
+  destination_mode = bin_mode = 0;
+  bracecount = destbracecount = binpos = binlen = 0;
+  yyrestart(fh);
+  BEGIN INITIAL;
 }
 

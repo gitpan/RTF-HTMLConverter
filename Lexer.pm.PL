@@ -95,7 +95,7 @@ sub unget_token { push @{$_[0]->{RTF_Lexer_backpack}}, $_[1] }
 
 =head1 NAME
 
-RTF::Lexer - Rich Text Format (RTF) format lexical analyzer.
+RTF::Lexer - Rich Text Format (RTF) lexical analyzer.
 
 =head1 SYNOPSIS
 

@@ -10,7 +10,7 @@ use Encode::Symbol;
 use RTF::Lexer qw(:all);
 
 our @ISA = qw(RTF::Lexer);
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 # The values provided by DOM implementation are not imported into current
 # namespace in this realization. Also there is no guarantee that these
@@ -49,7 +49,7 @@ sub init {
     open my $fh, "> $opts{out}" or throw Error::Simple("Can't open '$opts{out}': $!!\n");
     $opts{out} = $fh;
   }
-  $self->set_sink($opts{out}) if exists $opts{out};
+  $self->set_sink(exists $opts{out} ? $opts{out} : \*STDOUT);
   if(exists $opts{err} && !ref($opts{err})){
     open my $fh, "> $opts{err}" or throw Error::Simple("Can't open '$opts{err}': $!!\n");
     $opts{err} = $fh;
@@ -169,7 +169,7 @@ sub debug {
   return $_[0]->{debug_level}
 }
 
-sub get_log { return $_[0]->{_LOG} }
+sub get_log { $_[0]->{_LOG} }
 
 sub set_log {
   my ($self, $log) = @_;
@@ -186,7 +186,7 @@ sub set_log {
   return $oldlog;
 }
 
-sub get_sink { return $_[0]->{_OUT} }
+sub get_sink { $_[0]->{_OUT} }
 
 sub set_sink {
   my ($self, $sink) = @_;
@@ -222,6 +222,7 @@ sub set_sink {
 sub get_token {
   my $self = shift;
   my $token = $self->get_token_class()->new(@{$self->SUPER::get_token() || []});
+  return $token if $_[0];
   if($self->is_enter_token($token)){
     $self->{parse_stack}[0]++;
   }elsif($self->is_leave_token($token)){
@@ -413,14 +414,17 @@ sub pth_cword {                                  # th_cword with another prefixe
   my ($self, $token) = @_;
   my $word;
   return unless $token && ($word = $token->text());
+  my $param = $token->param();
   my $meth = ($self->{cword_prefix} || 'hcw_').$word;
   my $nm   = 'cw_'.$word;
   if(UNIVERSAL::can($self, $meth)){
-    $self->$meth($token->param());
+    $self->$meth($param);
   }elsif($self->is_destword($word)){
     $self->set_destination();
+  }elsif($word eq 'u'){
+    $self->$nm($param) if UNIVERSAL::can($self, $nm);
   }elsif(UNIVERSAL::can($self, $nm) && (my $cwmeth = $self->{orig_cword_handler})){
-    $self->$cwmeth($word, $token->param());
+    $self->$cwmeth($word, $param);
   }
 }
 
@@ -492,12 +496,21 @@ sub set_new_group_buffer {
   return $buf;
 }
 
+sub get_parsed_group_text {
+  my $self = shift;
+  my $buf = $self->set_new_group_buffer();
+  $self->parse();
+  return $buf->get_text();
+}
+
+sub get_parsed_group_pcdata { $_[0]->set_pcdata_mode(); $_[0]->get_parsed_group_text() }
+
 sub set_group_cwhandler {
   my ($self, $prefix) = @_;
   my @oldvalues;
   $oldvalues[0] = $self->set_token_handler(CWORD, 'pth_cword');
   $oldvalues[1] = $self->{cword_prefix};
-  $self->{cword_prefix}     = $prefix;
+  $self->{cword_prefix} = $prefix;
   $self->add_on_leave_handler('_restore_cwhandler', \@oldvalues);
 }
 
@@ -924,6 +937,8 @@ sub cw_mac  { $_[0]->{doc_codepage} = 'iso-8859-1' }
 sub cw_pc   { $_[0]->{doc_codepage} = 'cp437'      }
 sub cw_pca  { $_[0]->{doc_codepage} = 'cp850'      }
 
+###### Unicode RTF
+
 {
   my %supported_cp = map { $_ => 1 } qw(437 850 852 860 862 863 864 865
                                         866 874 932 936 949 950 1250 1251
@@ -936,8 +951,6 @@ sub cw_pca  { $_[0]->{doc_codepage} = 'cp850'      }
   sub cw_ansicpg { $_[0]->notes(ansicpg => 'cp'.$_[1]) if $supported_cp{$_[1]} }
 }
 
-###### Unicode RTF
-
 sub cw_upr {
   my $self = shift;
   while(1) {
@@ -947,13 +960,15 @@ sub cw_upr {
       last;
     }
     if($token->type() == ENTER){
+      my $h = $self->get_token_handler(ENTER);
+      $self->$h($token) if $h && $self->can($h);
       $self->set_destination();
       last;
     }
   }
 }
 
-sub cw_ud { }
+sub cw_ud { }                                    # By default this is destination word.
 
 sub cw_u {
   my ($self, $char) = @_;
@@ -963,7 +978,7 @@ sub cw_u {
   $uc = 1 unless defined $uc;
   my $string = '';
   while(length($string) < $uc){
-    my $token = $self->get_token();
+    my $token = $self->get_token(1);
     my ($type, $text) = ($token->type(), $token->text());
     if($type == PTEXT){
       $string .= $text;
@@ -994,19 +1009,6 @@ sub cw_uc { $_[0]->group_notes(uc => $_[1]) }
 
 ###### Font Table
 
-sub cw_stshfdbch { $_[0]->notes(stshfdbch => $_[1]) }
-sub cw_stshfloch { $_[0]->notes(stshfloch => $_[1]) }
-sub cw_stshfhich { $_[0]->notes(stshfhich => $_[1]) }
-sub cw_stshfbi   { $_[0]->notes(stshfbi   => $_[1]) }
-
-sub cw_deff {
-  my ($self, $num) = @_;
-  $self->notes(deff => $num);
-  my $font = $self->notes('f'.$num);
-  return unless $font;
-  $self->notes(f => $font);
-}
-
 sub cw_fonttbl {
   my $self = shift;
   $self->set_pcdata_mode();
@@ -1021,7 +1023,7 @@ sub cw_fonttbl {
     my $ff = $self->_get_font_family($font);
     return unless $ff;
     my $style = $self->get_style_element();
-    $self->append_text_node($style, "  BODY { font-family: $ff }\n", 1) if $style;
+    $self->append_text_node($style, "  BODY { font-family: $ff; font-size: 10pt }\n", 1) if $style;
   }
 }
 
@@ -1030,10 +1032,9 @@ sub fcw_f {
   my $font = {};
   $self->notes(f => $font);
   $self->notes('f'.$num => $font);
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  $font->{face} = $buf->get_text();
-  $font->{face} =~ s/;$//;
+  my $txt = $self->get_parsed_group_pcdata();
+  $txt =~ s/;$//;
+  $font->{face} = $txt;
 }
 
 sub fcw_fnil    { delete (($_[0]->notes('f') || {})->{family})       }
@@ -1041,6 +1042,15 @@ sub fcw_froman  { ($_[0]->notes('f') || {})->{family} = 'serif'      }
 sub fcw_fswiss  { ($_[0]->notes('f') || {})->{family} = 'sans-serif' }
 sub fcw_fmodern { ($_[0]->notes('f') || {})->{family} = 'monospace'  }
 sub fcw_fscript { ($_[0]->notes('f') || {})->{family} = 'cursive'    }
+sub fcw_fdecor  { ($_[0]->notes('f') || {})->{family} = 'fantasy'    }
+
+sub cw_deff {
+  my ($self, $num) = @_;
+  $self->notes(deff => $num);
+  my $font = $self->notes('f'.$num);
+  return unless $font;
+  $self->notes(f => $font);
+}
 
 {
   my %charsets = (
@@ -1080,10 +1090,8 @@ sub fcw_fscript { ($_[0]->notes('f') || {})->{family} = 'cursive'    }
 sub fcw_falt {
   my $self = shift;
   my $font = $self->notes('f');
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  return unless $font;
-  $font->{falt} = $buf->get_text();
+  my $txt = $self->get_parsed_group_pcdata();
+  ($font || {})->{falt} = $txt;
 }
 
 sub _get_text_encoding {
@@ -1145,7 +1153,8 @@ sub th_enter_style {
 
 sub _style_format_collector {
   my ($self, $word, $param) = @_;
-  my $style = $self->notes('style') || {};
+  my $style = $self->notes('style');
+  return unless $style;
   $style->{formatting} = [] unless $style->{formatting};
   push @{$style->{formatting}}, $self->get_token_class()->new(CWORD, $word, $param);
 }
@@ -1173,42 +1182,253 @@ sub scw_sbasedon {
   }
 }
 
-## RTF Document Area
+###### Table Styles
 
-#### Information Group
+sub _ts_set_padding {
+  my ($self, $num, $val) = @_;
+  my $dim = $self->notes($val);
+  return unless defined($dim) && $dim == 3;
+  $self->_td_style($self->twips2pt($num).'pt');
+}
 
-sub cw_info { }                                  # By default this is destination word.
+sub cw_tscellpaddt { $_[0]->_ts_set_padding($_[1], 'tscellpaddft') }
+sub cw_tscellpaddl { $_[0]->_ts_set_padding($_[1], 'tscellpaddfl') }
+sub cw_tscellpaddr { $_[0]->_ts_set_padding($_[1], 'tscellpaddfr') }
+sub cw_tscellpaddb { $_[0]->_ts_set_padding($_[1], 'tscellpaddfb') }
+
+sub cw_tscellpaddft { $_[0]->group_notes(tscellpaddft => $_[1]) }
+sub cw_tscellpaddfl { $_[0]->group_notes(tscellpaddfl => $_[1]) }
+sub cw_tscellpaddfr { $_[0]->group_notes(tscellpaddfr => $_[1]) }
+sub cw_tscellpaddfb { $_[0]->group_notes(tscellpaddfb => $_[1]) }
+
+sub cw_tsvertalt { $_[0]->_td_attr(valign => 'top'   ) }
+sub cw_tsvertalc { $_[0]->_td_attr(valign => 'center') }
+sub cw_tsvertalb { $_[0]->_td_attr(valign => 'bottom') }
+
+sub cw_tsnowrap { $_[0]->_td_style('white-space' => 'nowrap') }
+
+sub cw_tscellcfpat { $_[0]->_td_cfpat($_[1], 'tscellpct') }
+sub cw_tscellpct   { $_[0]->_td_shdng($_[1], 'tscellpct') }
+
+sub cw_tsbrdrt { $_[0]->_set_td_border_style('top')    }
+sub cw_tsbrdrb { $_[0]->_set_td_border_style('bottom') }
+sub cw_tsbrdrl { $_[0]->_set_td_border_style('left')   }
+sub cw_tsbrdrr { $_[0]->_set_td_border_style('right')  }
+
+###### List Table
+
+sub _get_current_list { $_[0]->notes($_[0]->notes('list_name') || 'list') }
+
+sub cw_listtable {
+  my $self = shift;
+  $self->set_new_group_buffer();
+  $self->set_group_cwhandler('ltcw_');
+  $self->set_group_orig_cword_handler('_list_format_collector');
+}
+
+sub _list_format_collector {
+  my ($self, $word, $param) = @_;
+  my $list = $self->_get_current_list();
+  return unless $list && @{$list->{levels}};
+  $list->{levels}[-1]{formatting} ||= [];
+  push @{$list->{levels}[-1]{formatting}}, $self->get_token_class()->new(CWORD, $word, $param);
+}
+
+######## Top-Level List Properties
+
+sub ltcw_list { $_[0]->group_notes(list => { levels => [] }) }
+
+sub ltcw_listid {
+  my ($self, $num) = @_;
+  my $list = $self->notes('list');
+  return unless $list;
+  $list->{id} = $num;
+  $self->notes('list'.($num || 0) => $list);
+}
+
+sub ltcw_listtemplateid { ($_[0]->notes('list') || {})->{templateid}  = $_[1] }
+
+sub ltcw_listsimple { ($_[0]->notes('list') || {})->{simple} = $_[1] }
+sub ltcw_listhybrid { ($_[0]->notes('list') || {})->{hybrid} = 1     }
+
+sub ltcw_listname {
+  my $self = shift;
+  my $txt = $self->get_parsed_group_pcdata();
+  $txt =~ s/;$//;
+  ($self->notes('list') || {})->{name} = $txt;
+}
+
+######## List Levels
+
+sub ltcw_listlevel {
+  my $self = shift;
+  my $list = $self->_get_current_list();
+  unless($list){
+    $self->set_destination();
+    return;
+  }
+  push @{$list->{levels}}, {};
+}
+
+sub _set_list_level_prop {
+  my ($self, $name, $value) = @_;
+  my $list = $self->_get_current_list();
+  return unless $list && @{$list->{levels}};
+  $list->{levels}[-1]{$name} = $value;
+}
+
+sub ltcw_levelstartat { shift()->_set_list_level_prop('start', @_) }
+
+{
+  my %list_numbering = (
+                         0  => ['decimal', '1', 'ol'],
+                         1  => ['upper-roman', 'I', 'ol'],
+                         2  => ['lower-roman', 'i', 'ol'],
+                         3  => ['upper-alpha', 'A', 'ol'],
+                         4  => ['lower-alpha', 'a', 'ol'],
+                         12 => ['katakana'],
+                         13 => ['katakana-iroha'],
+                         22 => ['decimal-leading-zero'],
+                         23 => ['disk', 'disk'],
+                         45 => ['hebrew'],     ## ??
+                         47 => ['hebrew'],     ## ??
+                       );
+  sub get_list_numbering { $list_numbering{$_[1]}         }
+  sub add_list_numbering { $list_numbering{$_[1]} = $_[2] }
+  sub del_list_numbering { delete $list_numbering{$_[1]}  }
+}
+
+sub ltcw_levelnfc { shift()->_set_list_level_prop('num', @_) }
+
+sub ltcw_levelnfcn { shift()->ltcw_levelnfc(@_) }
+
+sub ltcw_leveljc { shift()->_set_list_level_prop('align', { 0 => 'left', 1 => 'center', 2 => 'right' }->{$_[0]}) }
+
+sub ltcw_leveljcn { shift()->ltcw_leveljc(@_) }
+
+sub ltcw_leveltext    { $_[0]->set_destination() }
+sub ltcw_levelnumbers { $_[0]->set_destination() }
+
+######## List Override Table
+
+sub cw_listoverridetable {
+  my $self = shift;
+  $self->group_notes(list_name => 'listoverride');
+  $self->set_new_group_buffer();
+  $self->set_group_cwhandler('lotcw_');
+  $self->set_group_orig_cword_handler('_list_format_collector');
+}
+
+sub lotcw_listoverride { $_[0]->group_notes(listoverride => { levels => [] }) }
+
+sub lotcw_listid { ($_[0]->notes('listoverride') || {})->{lid} = $_[1] }
+
+sub lotcw_ls {
+  my ($self, $num) = @_;
+  my $lo = $self->notes('listoverride');
+  return unless $lo;
+  $lo->{id} = $num;
+  $self->notes('listoverride'.($num || 0) => $lo);
+}
+
+######## List Override Level
+
+sub lotcw_lfolevel {
+  my $self = shift;
+  unless($self->_get_current_list()){
+    $self->set_destination();
+    return;
+  }
+  $self->set_group_cwhandler('ltcw_');
+}
+
+sub ltcw_listoverridestartat {
+  my $self = shift;
+  my $lo = $self->_get_current_list();
+  return unless $lo;
+  push @{$lo->{lists}}, {};
+}
+
+###### Paragraph Group Properties
+
+
+#### Document Area
+
+###### Information Group
+
+sub cw_info { }
 
 sub cw_title {
   my $self = shift;
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  my $text = $buf->get_text();
+  my $text = $self->get_parsed_group_pcdata();
   my $head = $self->get_head_element();
   return unless $head;
   my $title = $self->create_element('title', $head);
   $self->append_text_node($title, $text);
 }
 
-#### Document Formatting Properties
+###### Document Formatting Properties
 
 sub cw_private { $_[0]->set_destination() if $_[1] == 1 }
 
-#### Section Text
+###### Section Text
 
-sub cw_sect {}
+sub cw_sect { $_[0]->flush_section() }
 
 sub cw_sectd { $_[0]->get_sect_stack()->[0] = $_[0]->get_element_class()->new() }
 
-###### Headers and Footers
+######## Headers and Footers
 
-#### Paragraph Text
+###### Paragraph Text
 
-###### Paragraph Formatting Properties
+######## Paragraph Formatting Properties
 
-sub cw_par   { $_[0]->current_buffer()->create_paragraph() }
+sub cw_par {
+  my $self = shift;
+  my ($ls, $ilvl) = map { $self->get_par()->notes($_) } qw(ls ilvl);
+  unless(defined $ls){
+    $self->current_buffer()->create_paragraph();
+    return;
+  }
+  my $buf = $self->current_buffer();
+  $buf->create_paragraph('li');
+  my $pl = $buf->get_paragraphs();
+  my ($ppar, $par) = @{$pl}[-3,-2];
+  $ilvl = 0 if $ilvl < 0;
+  my $listlevels = $self->notes('par_listlevels');
+  if($ppar && $listlevels && $listlevels->[0] == $ppar->data()){
+    splice @$listlevels, $ilvl+1 if $#$listlevels > $ilvl;
+    for (my $i = @$listlevels; $i<=$ilvl; $i++){
+      $self->_append_list_levels($listlevels, $ls, $i);
+    }
+    splice @$pl, @$pl-2, 1;
+  }else{
+    $listlevels = [];
+    $self->notes(par_listlevels => $listlevels);
+    for (my $i=0; $i<=$ilvl; $i++){
+      $self->_append_list_levels($listlevels, $ls, $i);
+    }
+    my $el = $self->get_element_class()->new();
+    $el->data($listlevels->[0]);
+    splice @$pl, @$pl-2, 1, $el;
+  }
+  $listlevels->[$ilvl]->appendChild($par->data());
+}
 
-sub cw_pard  { $_[0]->get_par_stack()->[0] = $_[0]->get_element_class()->new() }
+sub _append_list_levels {
+  my ($self, $listlevels, $ls, $i) = @_;
+  my $start = $self->get_list_level_prop($ls, $i, 'start');
+  my $num = $self->get_list_level_prop($ls, $i, 'num');
+  my $lnum = $self->get_list_numbering($num) || [];
+  my $le = $self->get_document()->createElement($lnum->[2] || 'ul');
+  $le->setAttribute(type => $lnum->[1]) if $lnum->[1];
+  $le->setAttribute(style => $self->get_element_class()->style_value({'list-style-type' => $lnum->[0]})) if $lnum->[0];
+  $le->setAttribute(start => $start) if $lnum->[2] && $start && $lnum->[2] eq 'ol';
+  $listlevels->[$i-1]->appendChild($le) if $i;
+  $listlevels->[$i] = $le;
+}
+
+sub cw_pard { $_[0]->get_par_stack()->[0] = $_[0]->get_element_class()->new() }
 
 sub cw_intbl { $_[0]->get_par()->notes(intbl => 1)          }
 sub cw_qc    { $_[0]->get_par()->attr(align => 'center')    }
@@ -1216,7 +1436,48 @@ sub cw_qj    { $_[0]->get_par()->attr(align => 'justified') }
 sub cw_ql    { $_[0]->get_par()->attr(align => 'left')      }
 sub cw_qr    { $_[0]->get_par()->attr(align => 'right')     }
 
-###### Paragraph Borders
+######## Bullets and Numbering
+
+########## Word 6.0 and Word 95 RTF
+
+sub cw_pntext { $_[0]->set_destination() }
+
+########## Word 97 through Word 2002 RTF
+
+sub get_list_level_prop {
+  my ($self, $ls, $ilvl, $name) = @_;
+  my $lo = $self->notes('listoverride'.($ls || 0));
+  return unless $lo;
+  my $lolevel = $lo->{levels}[$ilvl];
+  my $lilevel;
+  if(defined($lo->{lid}) && (my $list = $self->notes('list'.($lo->{lid} || 0)))){
+    $lilevel = $list->{levels}[$ilvl];
+  }
+  return $lolevel->{$name} if exists $lolevel->{$name};
+  return $lilevel->{$name} if $lilevel && exists $lilevel->{$name};
+  return;
+}
+
+sub cw_ls {
+  my ($self, $ls) = @_;
+  my $tokens = [];
+  my $ilvl = 0;
+  while((my $token = $self->get_token(1))){
+    if($token->type() == CWORD && $token->text() eq 'ilvl'){
+      $ilvl = $token->param();
+      last;
+    }
+    push @$tokens, $token;
+    last if $token->type() != CWORD || $token->text() eq 'par';
+  }
+  $self->get_par()->notes(ls => $ls);
+  $self->get_par()->notes(ilvl => $ilvl);
+  $self->unget_tokens($tokens);
+}
+
+sub cw_listtext { $_[0]->set_destination() }
+
+######## Paragraph Borders
 
 sub _set_border_style {
   my ($self, $type, $value) = @_;
@@ -1231,7 +1492,7 @@ sub _set_border_style {
 sub cw_brdrs { $_[0]->_set_border_style(style => 'solid') }
 sub cw_brdrw { $_[0]->_set_border_style(width => $_[0]->twips2pt($_[1]).'pt') }
 
-###### Table Definitions
+######## Table Definitions
 
 sub _get_table_node {
   my ($self, $skip_last_par) = @_;
@@ -1410,33 +1671,36 @@ sub _get_shdng_color {
   return '#'.join('', map { sprintf("%02x", 255-(255-$_)*$shad) } @clrs);
 }
 
-sub cw_clshdng {
-  my ($self, $val) = @_;
+sub _td_shdng {
+  my ($self, $val, $name) = @_;
   return if $val == 10000;
   my $color = $self->_td_attr('bgcolor');
   if($color){
     $color = $self->_get_shdng_color($color, $val);
     $self->_td_attr(bgcolor => $color);
   }else{
-    $self->_td_notes(clshdng => $val);
+    $self->_td_notes($name => $val);
   }
 }
 
-sub cw_clcfpat {
-  my ($self, $par) = @_;
+sub _td_cfpat {
+  my ($self, $par, $name) = @_;
   my $color = $self->get_color_triplet($par);
   return unless $color;
-  if($self->_td_notes('clshdng')){
-    $color = $self->_get_shdng_color($color, $self->_td_notes('clshdng'));
+  if($self->_td_notes($name)){
+    $color = $self->_get_shdng_color($color, $self->_td_notes($name));
   }
-  $self->_td_attr(bgcolor => $color);
+  $self->_td_attr(bgcolor => $color) if $color;
 }
+
+sub cw_clshdng { $_[0]->_td_shdng($_[1], 'clshdng') }
+sub cw_clcfpat { $_[0]->_td_cfpat($_[1], 'clshdng') }
 
 sub cw_clvertalt { $_[0]->_td_attr(valign => 'top')    }
 sub cw_clvertalc { $_[0]->_td_attr(valign => 'center') }
 sub cw_clvertalb { $_[0]->_td_attr(valign => 'bottom') }
 
-#### Character Text
+###### Character Text
 
 sub _apply_style {
   my ($self, $type, $num) = @_;
@@ -1445,20 +1709,30 @@ sub _apply_style {
   $self->unget_tokens($style->{formatting});
 }
 
-sub cw_cs  { $_[0]->_apply_style('cs', $_[1])  }
+sub cw_cs  { 
+  my ($self, $n) = @_;
+  return unless defined $n;
+  my $style = $self->notes('cs'.$n);
+  return unless $style;
+  $self->_clear_char_format() unless $style->{additive};
+  $self->_apply_style('cs', $n)  ;
+}
+
 sub cw_s   { $_[0]->_apply_style('s', $_[1])   }
 sub cw_ds  { $_[0]->_apply_style('ds', $_[1])  }
 sub cw_ts  { $_[0]->_apply_style('ts', $_[1])  }
 
-###### Font (Character) Formatting Properties
+######## Font (Character) Formatting Properties
 
 sub cw_plain {
   my $self = shift;
   my $deff = $self->notes('deff') || '0';
   my $font = $self->notes('f'.$deff);
   $self->group_notes(f => $font) if $font;
-  $self->get_char_stack()->clear(sub { $_[0]->notes('plain_retain') });
+  $self->_clear_char_format();
 }
+
+sub _clear_char_format { $_[0]->get_char_stack()->clear(sub {$_[0]->notes('not_char_format')}) }
 
 sub _manage_tag {
   defined($_[2]) && $_[2] eq '0' ? $_[0]->close_char_tag($_[1]) : $_[0]->open_char_tag($_[1])
@@ -1499,6 +1773,33 @@ sub cw_sub   { $_[0]->open_char_tag('sub')   }
 sub cw_super { $_[0]->open_char_tag('sup')   }
 sub cw_ul    { shift()->_manage_tag('u', @_) }
 
+######## Special Characters
+
+sub cw_line { $_[0]->append_tag('br') }
+
+sub cw_lbr {
+  my ($self, $par) = @_;
+  my $el = $self->append_tag('br');
+  my $clear = $par == 3 ? 'all'   :
+              $par == 2 ? 'right' :
+              $par == 1 ? 'left'  : 0;
+  $el->setAttribute(clear => $clear) if $clear;
+}
+
+sub cw_tab       { $_[0]->append_entity('nbsp') foreach 1..8 }
+sub cw_emdash    { $_[0]->append_entity('mdash')  }
+sub cw_endash    { $_[0]->append_entity('ndash')  }
+sub cw_emspace   { $_[0]->append_entity('emsp')   }
+sub cw_enspace   { $_[0]->append_entity('ensp')   }
+sub cw_qmspace   { $_[0]->append_entity('thinsp') }
+sub cw_bullet    { $_[0]->append_entity('bull')   }
+sub cw_lquote    { $_[0]->append_entity('lsquo')  }
+sub cw_rquote    { $_[0]->append_entity('rsquo')  }
+sub cw_ldblquote { $_[0]->append_entity('ldquo')  }
+sub cw_rdblquote { $_[0]->append_entity('rdquo')  }
+sub cw_zwj       { $_[0]->append_entity('zwj')    }
+sub cw_zwnj      { $_[0]->append_entity('zwnj')   }
+
 ###### Bookmarks
 
 sub _get_ancor_name {
@@ -1513,9 +1814,7 @@ sub _get_ancor_name {
 sub cw_bkmkstart {
   my $self = shift;
   $self->set_pcdata_mode();
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  my $txt = $buf->get_text();
+  my $txt = $self->get_parsed_group_text();
   my $name = $self->_get_ancor_name($txt);
   my $el= $self->create_element('a');
   $el->setAttribute(name => $name);
@@ -1703,12 +2002,7 @@ sub cw_shpinst {
   $cbuf->merge($buf);
 }
 
-sub cw_sn {
-  my $self = shift;
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  $self->notes(sn => $buf->get_text());
-}
+sub cw_sn { $_[0]->notes(sn => $_[0]->get_parsed_group_text()) }
 
 sub cw_sv {
   my $self = shift;
@@ -1722,33 +2016,6 @@ sub cw_sv {
 sub cw_shptxt { $_[0]->set_destination() }
 
 sub cw_shprslt { $_[0]->set_destination() if $_[0]->notes('shp') }
-
-#### Special Characters
-
-sub cw_line { $_[0]->append_tag('br') }
-
-sub cw_lbr {
-  my ($self, $par) = @_;
-  my $el = $self->append_tag('br');
-  my $clear = $par == 3 ? 'all'   :
-              $par == 2 ? 'right' :
-              $par == 1 ? 'left'  : 0;
-  $el->setAttribute(clear => $clear) if $clear;
-}
-
-sub cw_tab       { $_[0]->append_entity('nbsp') foreach 1..8 }
-sub cw_emdash    { $_[0]->append_entity('mdash')  }
-sub cw_endash    { $_[0]->append_entity('ndash')  }
-sub cw_emspace   { $_[0]->append_entity('emsp')   }
-sub cw_enspace   { $_[0]->append_entity('ensp')   }
-sub cw_qmspace   { $_[0]->append_entity('thinsp') }
-sub cw_bullet    { $_[0]->append_entity('bull')   }
-sub cw_lquote    { $_[0]->append_entity('lsquo')  }
-sub cw_rquote    { $_[0]->append_entity('rsquo')  }
-sub cw_ldblquote { $_[0]->append_entity('ldquo')  }
-sub cw_rdblquote { $_[0]->append_entity('rdquo')  }
-sub cw_zwj       { $_[0]->append_entity('zwj')    }
-sub cw_zwnj      { $_[0]->append_entity('zwnj')   }
 
 ###### Footnotes
 
@@ -1808,22 +2075,21 @@ sub cw_field { $_[0]->group_notes(fldrslt_skip => 0) }
 
 sub cw_fldinst {
   my $self = shift;
-  my $buf = $self->set_new_group_buffer();
-  $self->parse();
-  my $txt = $buf->get_text();
+  my $txt = $self->get_parsed_group_text();
   if($txt =~ /HYPERLINK\s+"?([^\s"]+)"?\s*$/){
     $self->char_tag_attr('a', href => "$1");
-    $self->char_tag_notes('a', plain_retain => 1);
+    $self->char_tag_notes('a', not_char_format => 1);
   }elsif($txt =~ /HYPERLINK\s+\\l\s+"?([^"]+)"?\s*$/){
     my $name = $self->_get_ancor_name($1);
     $self->char_tag_attr('a', href => '#'.$name);
-    $self->char_tag_notes('a', plain_retain => 1);
+    $self->char_tag_notes('a', not_char_format => 1);
   }elsif($txt =~ /SYMBOL\s+(\d+)/){
     my $code = $1;
     my ($fname) = $txt =~ /\\f\s+"([^"]+)"/;
     if($fname && (my ($font) = grep { $_->{face} eq $fname }
                                map  { $self->{notes}{$_}   }
                                grep { /^f\d+$/ } keys %{$self->{notes}})){
+      $self->notes(fldrslt_skip => 1);
       my $oldf = $self->notes(f => $font);
       if($txt =~ /\\s\s+(\d+)/){
         my $size = $1;
@@ -1844,6 +2110,22 @@ sub cw_fldinst {
     $el->setAttribute(href => '#'.$name);
     $self->append_text_node($el, '*');
     $self->append_element($el);
+  }elsif($txt =~ /\\import\s+([^}]+)/){
+    my $fname = $1;
+    return if $self->{discard_images};
+    my $imgname = $fname;
+    $imgname = File::Spec->catfile($self->{image_dir}, $imgname) if length $self->{image_dir};
+    return unless -s $imgname;
+    my $info = Image::Info::image_info($imgname);
+    my ($w, $h) = @{$info}{qw(width height)};
+    return unless $w && $h;
+    $self->notes(fldrslt_skip => 1);
+    my $url = join('/', grep { length } ($self->{image_uri}, $fname));
+    my $img = $self->append_tag('img');
+    $img->setAttribute(src => $url);
+    $img->setAttribute(width => $w);
+    $img->setAttribute(height => $h);
+    $img->setAttribute(alt => '');
   }
 }
 
@@ -2003,7 +2285,7 @@ sub get_element_class { $_[0]->[_CLA] }
 
 sub item { [ map { $_->clone(1) } @{$_[0]->_get_top()} ] }
 
-sub modified { $_[0]->[_MST][0] = 1 if $_[1]; return shift()->SUPER::modified(@_) }
+sub modified { $_[0]->[_MST][0] = 1 if $_[1]; shift()->SUPER::modified(@_) }
 
 sub dup {
   my $self = shift;
@@ -2159,7 +2441,8 @@ sub _flush_par {
   return unless $par;
   my $pe = $par->data();
   $par->merge($self->[_PST][0]) unless $par->notes('no_par_stack');
-  $par->set_element_attrs($self->[_DOC]);
+  $par->set_element_attrs($self->[_DOC], @_);
+  return $par;
 }
 
 sub _check_mod { $_[0]->_flush_fragment() if $_[0]->[_CST]->modified() }
@@ -2186,9 +2469,9 @@ sub add_entity {
 
 sub create_paragraph {
   my $self = shift;
-  $self->_flush_par();
-  my $p = $self->_create_par();
-  return $p;
+  $self->_flush_par(@_);
+  $self->_create_par();
+  return $self->[_CPS][-2];
 }
 
 sub _get_text_contents {
@@ -2218,7 +2501,7 @@ sub get_text {
   return $txt;
 }
 
-sub get_paragraphs { $_[0]->_flush_par(); return $_[0]->[_CPS] }
+sub get_paragraphs { $_[0]->_flush_par(); $_[0]->[_CPS] }
 
 sub add_paragraphs { $_[0]->_flush_par(); push @{$_[0]->[_CPS]}, @{$_[1] || []} }
 
