@@ -3,11 +3,13 @@ MANIFEST
 Makefile.PL
 README
 HTMLConverter.pm
-Lexer.pm.PL
-Lexer.xs
-rtfparser.c
-rtfparser.h
-rtfparser.l
-test.pl
-test.rtf
+Lexer/Lexer.pm.PL
+Lexer/Lexer.xs
+Lexer/Makefile.PL
+Lexer/rtfparser.c
+Lexer/rtfparser.h
+Lexer/rtfparser.l
+Lexer/test.pl
+Lexer/test.rtf
+examples/rtf2html.pl
 
