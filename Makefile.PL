@@ -23,6 +23,7 @@ use File::Spec;
 WriteMakefile(
     NAME                => 'RTF::HTMLConverter',
     VERSION_FROM        => 'HTMLConverter.pm',
+    XS_VERSION          => 0.03,
     INC                 => ' -I. ',
     PM                  => { 
               'Lexer.pm'         => File::Spec->catfile('$(INST_LIBDIR)', 'Lexer.pm'),

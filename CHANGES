@@ -1,3 +1,5 @@
+0.041 Fri 13 February 2004.
+  - Added XS_VERSION in Makefile.PL.
 0.04  Fri 13 February 2004.
   - Fixed bug in determining document title's encoding
     (reported by Oleg Bartunov).

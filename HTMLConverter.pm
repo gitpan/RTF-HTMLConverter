@@ -10,7 +10,7 @@ use Encode::Symbol;
 use RTF::Lexer qw(:all);
 
 our @ISA = qw(RTF::Lexer);
-our $VERSION = '0.04';
+our $VERSION = '0.041';
 
 # The values provided by DOM implementation are not imported into current
 # namespace in this realization. Also there is no guarantee that these
